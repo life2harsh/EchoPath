@@ -1,0 +1,2 @@
+[console_scripts]
+echopath = echopath.cli:main
