@@ -1,10 +1,12 @@
 pyproject.toml
 echopath/__init__.py
 echopath/__main__.py
+echopath/audio_features.py
 echopath/cli.py
 echopath/config.py
 echopath/commands/__init__.py
 echopath/commands/benchmark_search.py
+echopath/commands/enrich_manifest.py
 echopath/commands/ingest.py
 echopath/commands/train_classical.py
 echopath/commands/train_cnn.py
