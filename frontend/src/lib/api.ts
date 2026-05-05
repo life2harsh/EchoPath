@@ -5,6 +5,7 @@ import type {
   PlaylistRequest,
   PlaylistResult,
   SearchAlgorithmSummary,
+  TrackAnalysisResponse,
   TrackRecord,
 } from "./types";
 
@@ -39,6 +40,29 @@ export function fetchTracks(search?: string) {
 
 export function fetchTrack(trackId: string) {
   return apiRequest<TrackRecord>(`/tracks/${trackId}`);
+}
+
+export async function analyzeTrackUpload(file: File, title?: string, artist?: string) {
+  const body = new FormData();
+  body.append("file", file);
+  if (title) {
+    body.append("title", title);
+  }
+  if (artist) {
+    body.append("artist", artist);
+  }
+
+  const response = await fetch(`${EFFECTIVE_BASE_URL}/tracks/analyze`, {
+    method: "POST",
+    body,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Upload analysis failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<TrackAnalysisResponse>;
 }
 
 export function generatePlaylist(payload: PlaylistRequest) {

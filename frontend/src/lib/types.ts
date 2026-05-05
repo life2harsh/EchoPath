@@ -1,4 +1,4 @@
-export type AlgorithmName = "bfs" | "dfs" | "ucs" | "ids" | "astar" | "idastar";
+export type AlgorithmName = "bfs" | "dfs" | "ucs" | "ids" | "idastar" | "astar";
 export type TargetType = "genre" | "cluster";
 export type TempoPolicy = "any" | "steady" | "lift" | "cooldown";
 
@@ -17,6 +17,29 @@ export interface TrackRecord {
   stream_url: string | null;
   spectrogram_url: string | null;
   summary: string | null;
+
+  preference_score: number | null;
+  mood_fit_score: number | null;
+  cnn_genre_prediction: string | null;
+  cnn_genre_confidence: number | null;
+  signal_source: string | null;
+}
+
+export interface TrackAnalysisResponse {
+  track: TrackRecord;
+  detected_features: Record<string, number>;
+  assigned_cluster_id: number | null;
+  predicted_genre: string | null;
+  predicted_genre_confidence: number;
+  nearest_neighbors: Array<{
+    track_id: string;
+    title: string;
+    artist: string;
+    genre_label: string | null;
+    cluster_id: number | null;
+    distance: number;
+  }>;
+  explanation: string;
 }
 
 export interface ConstraintSet {
@@ -43,6 +66,19 @@ export interface PlaylistStep {
   explanation: string;
 }
 
+export interface PlaylistQualityMetrics {
+  average_transition_cost: number;
+  tempo_variance: number;
+  energy_variance: number;
+  genre_diversity: number;
+  artist_diversity: number;
+  preference_mean: number;
+  cnn_target_alignment: number;
+  constraint_satisfaction_rate: number;
+  hill_climbing_improvement: number;
+  refinement_applied: boolean;
+}
+
 export interface PlaylistResult {
   playlist_id: string;
   algorithm: AlgorithmName;
@@ -54,6 +90,7 @@ export interface PlaylistResult {
   target_hit: boolean;
   constraint_summary: string;
   explanation: string;
+  quality_metrics: PlaylistQualityMetrics;
   steps: PlaylistStep[];
 }
 

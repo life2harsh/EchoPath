@@ -3,17 +3,20 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
 import { SectionCard } from "../components/SectionCard";
-import { fetchClusters, fetchTracks, generatePlaylist } from "../lib/api";
+import { analyzeTrackUpload, fetchClusters, fetchTracks, generatePlaylist } from "../lib/api";
 import { titleCase } from "../lib/format";
-import type { AlgorithmName, PlaylistRequest, TargetType, TempoPolicy } from "../lib/types";
+import type { AlgorithmName, PlaylistRequest, TargetType, TempoPolicy, TrackRecord } from "../lib/types";
 
 const algorithms: AlgorithmName[] = ["astar", "idastar", "ucs", "bfs", "dfs", "ids"];
 const tempoPolicies: TempoPolicy[] = ["any", "steady", "lift", "cooldown"];
 
 export function BuilderPage() {
   const navigate = useNavigate();
-  const { data: tracks = [] } = useQuery({ queryKey: ["builder-tracks"], queryFn: () => fetchTracks() });
+  const { data: libraryTracks = [] } = useQuery({ queryKey: ["builder-tracks"], queryFn: () => fetchTracks() });
   const { data: clusters = [] } = useQuery({ queryKey: ["clusters"], queryFn: fetchClusters });
+
+  const [uploadedTracks, setUploadedTracks] = useState<TrackRecord[]>([]);
+  const tracks = useMemo(() => [...uploadedTracks, ...libraryTracks], [uploadedTracks, libraryTracks]);
 
   const genres = useMemo(
     () => Array.from(new Set(tracks.map((track) => track.genre_label).filter(Boolean))) as string[],
@@ -28,6 +31,34 @@ export function BuilderPage() {
   const [tempoPolicy, setTempoPolicy] = useState<TempoPolicy>("lift");
   const [artistRepeatLimit, setArtistRepeatLimit] = useState(1);
   const [explicitFilter, setExplicitFilter] = useState(true);
+
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTitle, setUploadTitle] = useState("");
+  const [uploadArtist, setUploadArtist] = useState("");
+  const [analysisText, setAnalysisText] = useState("");
+
+  const uploadMutation = useMutation({
+    mutationFn: () => {
+      if (!uploadFile) {
+        throw new Error("Choose an audio file first.");
+      }
+      return analyzeTrackUpload(uploadFile, uploadTitle, uploadArtist);
+    },
+    onSuccess: (analysis) => {
+      setUploadedTracks((current) => [
+        analysis.track,
+        ...current.filter((track) => track.track_id !== analysis.track.track_id),
+      ]);
+      setSeedTrackId(analysis.track.track_id);
+      setAnalysisText(
+        `Analyzed ${analysis.track.title}: ${analysis.track.tempo?.toFixed(0) ?? "--"} BPM, ` +
+          `energy ${analysis.track.energy?.toFixed(2) ?? "--"}, ` +
+          `cluster ${analysis.assigned_cluster_id ?? "?"}, ` +
+          `predicted genre ${analysis.predicted_genre ?? "unknown"} ` +
+          `(${(analysis.predicted_genre_confidence * 100).toFixed(1)}%).`,
+      );
+    },
+  });
 
   const mutation = useMutation({
     mutationFn: generatePlaylist,
@@ -64,9 +95,58 @@ export function BuilderPage() {
   return (
     <div className="page-grid page-grid--builder">
       <SectionCard
+        eyebrow="Upload Seed"
+        title="Analyze a new song and use it as the playlist seed"
+        subtitle="The backend extracts audio features, estimates cluster/genre from the current library, creates a spectrogram, and adds the uploaded track to the graph for this session."
+      >
+        <div className="builder-form">
+          <label>
+            Audio file
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
+            />
+          </label>
+
+          <label>
+            Display title
+            <input
+              type="text"
+              value={uploadTitle}
+              onChange={(event) => setUploadTitle(event.target.value)}
+              placeholder="Optional"
+            />
+          </label>
+
+          <label>
+            Artist
+            <input
+              type="text"
+              value={uploadArtist}
+              onChange={(event) => setUploadArtist(event.target.value)}
+              placeholder="Optional"
+            />
+          </label>
+
+          <button
+            type="button"
+            className="primary-button"
+            disabled={uploadMutation.isPending || !uploadFile}
+            onClick={() => uploadMutation.mutate()}
+          >
+            {uploadMutation.isPending ? "Analyzing..." : "Analyze and use as seed"}
+          </button>
+
+          {analysisText ? <p className="preview-card__notice">{analysisText}</p> : null}
+          {uploadMutation.isError ? <p className="error-text">{(uploadMutation.error as Error).message}</p> : null}
+        </div>
+      </SectionCard>
+
+      <SectionCard
         eyebrow="Playlist Builder"
         title="Set the graph search problem"
-        subtitle="Same UI contract now, smarter heuristics later."
+        subtitle="The generator uses transition smoothness, cluster/genre target fit, preference signal, CNN/proxy alignment, constraints, and hill-climbing refinement."
       >
         <form className="builder-form" onSubmit={submit}>
           <label>
@@ -75,6 +155,7 @@ export function BuilderPage() {
               {tracks.map((track) => (
                 <option key={track.track_id} value={track.track_id}>
                   {track.title} / {track.artist}
+                  {track.track_id.startsWith("upload-") ? " / uploaded" : ""}
                 </option>
               ))}
             </select>
@@ -170,22 +251,20 @@ export function BuilderPage() {
             {mutation.isPending ? "Generating..." : "Generate playlist"}
           </button>
 
-          {mutation.isError ? (
-            <p className="error-text">{(mutation.error as Error).message}</p>
-          ) : null}
+          {mutation.isError ? <p className="error-text">{(mutation.error as Error).message}</p> : null}
         </form>
       </SectionCard>
 
       <SectionCard
         eyebrow="How To Read This"
-        title="What this builder already proves"
-        subtitle="Even before the real dataset lands, the UI and API contract are aligned with the final architecture."
+        title="What this builder demonstrates"
+        subtitle="The UI exposes the full search problem while the backend performs audio-aware graph generation."
       >
         <ul className="bullet-list">
-          <li>The builder already sends a typed playlist-generation request to the backend.</li>
-          <li>The backend already chooses between BFS, DFS, UCS, IDS, A*, and IDA*.</li>
-          <li>Cluster and genre targets are first-class fields, not demo-only placeholders.</li>
-          <li>When the dataset arrives, this form does not need redesign; it just gets better data.</li>
+          <li>Uploaded audio can be analyzed and used as a temporary graph seed.</li>
+          <li>The backend supports BFS, DFS, UCS, IDS, A*, and IDA*.</li>
+          <li>Cluster and genre targets are first-class playlist goals.</li>
+          <li>Generated playlists include quality metrics and hill-climbing refinement output.</li>
         </ul>
       </SectionCard>
     </div>

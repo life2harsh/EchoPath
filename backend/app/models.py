@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -16,14 +16,30 @@ class TrackRecord(BaseModel):
     duration_sec: int = Field(ge=1)
     genre_label: str | None = None
     cluster_id: int | None = None
-    energy: float | None = Field(default=None, ge=0.0, le=1.0)
+    energy: float | None = Field(default=None, ge=0.0)
     tempo: float | None = Field(default=None, ge=0.0)
-    valence: float | None = Field(default=None, ge=0.0, le=1.0)
+    valence: float | None = Field(default=None, ge=0.0)
     explicit: bool = False
     audio_path: str | None = None
     stream_url: str | None = None
     spectrogram_url: str | None = None
     summary: str | None = None
+
+    preference_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    mood_fit_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    cnn_genre_prediction: str | None = None
+    cnn_genre_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    signal_source: str | None = None
+
+
+class TrackAnalysisResponse(BaseModel):
+    track: TrackRecord
+    detected_features: dict[str, float | int]
+    assigned_cluster_id: int | None = None
+    predicted_genre: str | None = None
+    predicted_genre_confidence: float = Field(ge=0.0, le=1.0)
+    nearest_neighbors: list[dict[str, Any]]
+    explanation: str
 
 
 class ConstraintSet(BaseModel):
@@ -50,6 +66,19 @@ class PlaylistStep(BaseModel):
     explanation: str
 
 
+class PlaylistQualityMetrics(BaseModel):
+    average_transition_cost: float = Field(ge=0.0)
+    tempo_variance: float = Field(ge=0.0)
+    energy_variance: float = Field(ge=0.0)
+    genre_diversity: float = Field(ge=0.0, le=1.0)
+    artist_diversity: float = Field(ge=0.0, le=1.0)
+    preference_mean: float = Field(ge=0.0, le=1.0)
+    cnn_target_alignment: float = Field(ge=0.0, le=1.0)
+    constraint_satisfaction_rate: float = Field(ge=0.0, le=1.0)
+    hill_climbing_improvement: float = Field(ge=0.0)
+    refinement_applied: bool
+
+
 class PlaylistResult(BaseModel):
     playlist_id: str
     algorithm: AlgorithmName
@@ -61,6 +90,7 @@ class PlaylistResult(BaseModel):
     target_hit: bool
     constraint_summary: str
     explanation: str
+    quality_metrics: PlaylistQualityMetrics
     steps: list[PlaylistStep]
 
 

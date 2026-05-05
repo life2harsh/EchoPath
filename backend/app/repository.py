@@ -6,6 +6,7 @@ import heapq
 import json
 import mimetypes
 from pathlib import Path
+from statistics import pvariance
 from time import perf_counter
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from .models import (
     ClusterSummary,
     DatasetStatus,
     ModelSummary,
+    PlaylistQualityMetrics,
     PlaylistRequest,
     PlaylistResult,
     PlaylistStep,
@@ -25,7 +27,9 @@ from .models import (
 
 
 MAX_EXPANSIONS = 3_000
-NEIGHBOR_LIMIT = 6
+NEIGHBOR_LIMIT = 8
+HILL_CLIMB_CANDIDATES = 10
+HILL_CLIMB_PASSES = 2
 
 
 @dataclass
@@ -34,14 +38,26 @@ class SearchOutcome:
     cost: float
     nodes_expanded: int
     target_hit: bool
+    pre_refinement_cost: float | None = None
+    refinement_applied: bool = False
 
 
 class Repository:
+    """Repository and playlist-search engine.
+
+    The backend consumes the enriched manifest produced by the training
+    pipeline. Each track can include classical/CNN-derived signals such as
+    preference_score, mood_fit_score, and cnn_genre_prediction. These fields are
+    optional so the app still runs on sample data, but when present they influence
+    search cost and A* heuristics.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._tracks: list[TrackRecord] = []
         self._track_index: dict[str, TrackRecord] = {}
         self._playlists: dict[str, PlaylistResult] = {}
+        self._neighbor_cache: dict[tuple[str, str, str, str], list[str]] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -51,6 +67,7 @@ class Repository:
 
         self._tracks = [self._attach_urls(track) for track in raw_tracks]
         self._track_index = {track.track_id: track for track in self._tracks}
+        self._neighbor_cache.clear()
         self._dataset_status = DatasetStatus(
             source=str(data_path),
             using_sample_data=using_sample,
@@ -88,6 +105,7 @@ class Repository:
                 if needle in track.title.lower()
                 or needle in track.artist.lower()
                 or (track.genre_label and needle in track.genre_label.lower())
+                or (track.cnn_genre_prediction and needle in track.cnn_genre_prediction.lower())
             ]
         if genre:
             tracks = [track for track in tracks if track.genre_label == genre]
@@ -155,20 +173,25 @@ class Repository:
         if outcome is None:
             outcome = self._greedy_fallback(seed.track_id, request)
 
+        refined = self._hill_climb_refine(outcome, request)
+
         runtime_ms = round((perf_counter() - start) * 1000, 2)
         playlist_id = uuid4().hex[:10]
-        steps = self._build_playlist_steps(outcome.path)
+        steps = self._build_playlist_steps(refined.path, request)
+        quality_metrics = self._playlist_quality_metrics(refined, request)
+
         result = PlaylistResult(
             playlist_id=playlist_id,
             algorithm=request.algorithm,
             target_type=request.target_type,
             target_value=request.target_value,
-            total_cost=round(outcome.cost, 4),
+            total_cost=round(refined.cost, 4),
             runtime_ms=runtime_ms,
-            nodes_expanded=outcome.nodes_expanded,
-            target_hit=outcome.target_hit,
+            nodes_expanded=refined.nodes_expanded,
+            target_hit=refined.target_hit,
             constraint_summary=self._summarize_constraints(request),
-            explanation=self._playlist_explanation(request, outcome.target_hit),
+            explanation=self._playlist_explanation(request, refined.target_hit, refined.refinement_applied),
+            quality_metrics=quality_metrics,
             steps=steps,
         )
         self._playlists[playlist_id] = result
@@ -207,34 +230,34 @@ class Repository:
     def model_summaries(self) -> list[ModelSummary]:
         return [
             ModelSummary(
-                model_name="Logistic Regression",
+                model_name="Logistic Regression Mood-Cluster Classifier",
                 family="classical",
-                status="ready",
-                notes="Wired into the project structure and waiting for real feature matrices.",
+                status="trained",
+                notes="Strong classical mood-fit experiment reflected through enriched manifest signals.",
             ),
             ModelSummary(
-                model_name="Random Forest",
+                model_name="Extra Trees Top-5 Genre Classifier",
                 family="classical",
-                status="ready",
-                notes="Reserved for proxy preference modeling once track-level labels are extracted.",
+                status="trained",
+                notes="Best balanced top-5 handcrafted-feature genre baseline.",
             ),
             ModelSummary(
                 model_name="LeNet Spectrogram CNN",
                 family="cnn",
-                status="planned",
-                notes="Will be the smallest PyTorch baseline for quick GPU sanity checks.",
+                status="trained",
+                notes="Working mel-spectrogram baseline for genre classification.",
             ),
             ModelSummary(
                 model_name="VGG-style Spectrogram CNN",
                 family="cnn",
                 status="planned",
-                notes="Intended for deeper convolutional comparisons on mel-spectrogram images.",
+                notes="Deeper architecture reserved for larger GPU experiments.",
             ),
             ModelSummary(
                 model_name="ResNet-style Spectrogram CNN",
                 family="cnn",
                 status="planned",
-                notes="Planned as the strongest architecture for final report comparisons and heuristics.",
+                notes="Residual architecture reserved for final deep-learning comparison.",
             ),
         ]
 
@@ -243,29 +266,27 @@ class Repository:
             SearchAlgorithmSummary(
                 algorithm=algorithm,
                 readiness="wired",
-                notes="Implemented against the shared similarity graph and ready for real benchmarks."
-                if algorithm in {"bfs", "dfs", "ucs", "ids", "astar", "idastar"}
-                else "",
+                notes="Runs on feature-similarity graph with target, preference, CNN/proxy, and constraint-aware scoring.",
             )
             for algorithm in ("bfs", "dfs", "ucs", "ids", "astar", "idastar")
         ]
 
-    def _build_playlist_steps(self, path: list[str]) -> list[PlaylistStep]:
+    def _build_playlist_steps(self, path: list[str], request: PlaylistRequest) -> list[PlaylistStep]:
         steps: list[PlaylistStep] = []
         previous: TrackRecord | None = None
         for index, track_id in enumerate(path, start=1):
             track = self.get_track(track_id)
-            edge_cost = 0.0 if previous is None else round(self._edge_cost(previous, track, "any"), 4)
+            edge_cost = 0.0 if previous is None else round(self._composite_edge_cost(previous, track, request), 4)
             explanation = (
                 "Seed track anchors the path."
                 if previous is None
-                else self._transition_explanation(previous, track)
+                else self._transition_explanation(previous, track, request)
             )
             steps.append(PlaylistStep(order=index, track=track, edge_cost=edge_cost, explanation=explanation))
             previous = track
         return steps
 
-    def _transition_explanation(self, previous: TrackRecord, current: TrackRecord) -> str:
+    def _transition_explanation(self, previous: TrackRecord, current: TrackRecord, request: PlaylistRequest) -> str:
         tempo_delta = abs((previous.tempo or 0.0) - (current.tempo or 0.0))
         energy_delta = abs((previous.energy or 0.0) - (current.energy or 0.0))
         cluster_phrase = (
@@ -278,21 +299,34 @@ class Repository:
             if previous.genre_label == current.genre_label
             else f"crossfades toward {current.genre_label or 'a new texture'}"
         )
+
+        signal_parts: list[str] = []
+        if current.preference_score is not None:
+            signal_parts.append(f"preference score {current.preference_score:.2f}")
+        if current.cnn_genre_prediction:
+            confidence = f" ({current.cnn_genre_confidence:.2f})" if current.cnn_genre_confidence is not None else ""
+            signal_parts.append(f"CNN/proxy genre signal {current.cnn_genre_prediction}{confidence}")
+
+        signal_text = f" Model signals: {', '.join(signal_parts)}." if signal_parts else ""
+        target_text = " Target aligned." if self._matches_target(current, request) else ""
+
         return (
             f"{cluster_phrase}, {genre_phrase}, tempo shift {tempo_delta:.1f} BPM, "
-            f"energy delta {energy_delta:.2f}."
+            f"energy delta {energy_delta:.2f}.{target_text}{signal_text}"
         )
 
-    def _playlist_explanation(self, request: PlaylistRequest, target_hit: bool) -> str:
+    def _playlist_explanation(self, request: PlaylistRequest, target_hit: bool, refined: bool) -> str:
         target_text = f"{request.target_type} '{request.target_value}'"
+        refinement_text = " A hill-climbing refinement pass improved the local path cost." if refined else ""
         if target_hit:
             return (
                 f"The path reaches the requested {target_text} while preserving "
-                f"{request.constraints.tempo_policy} tempo movement and the artist repetition cap."
+                f"{request.constraints.tempo_policy} tempo movement, artist repetition limits, "
+                f"and ML/CNN-derived preference signals.{refinement_text}"
             )
         return (
-            f"The current sample library could not fully hit {target_text}, so the generator returned "
-            f"the smoothest feasible approximation under the active constraints."
+            f"The current library could not fully hit {target_text}, so the generator returned "
+            f"the smoothest feasible approximation under the active constraints.{refinement_text}"
         )
 
     def _summarize_constraints(self, request: PlaylistRequest) -> str:
@@ -318,7 +352,7 @@ class Repository:
             last = self.get_track(path[-1])
             expansions += 1
             for neighbor in self._neighbors(last, path, request):
-                queue.append((neighbor.track_id, path + [neighbor.track_id], cost + self._edge_cost(last, neighbor, request.constraints.tempo_policy)))
+                queue.append((neighbor.track_id, path + [neighbor.track_id], cost + self._composite_edge_cost(last, neighbor, request)))
         return None
 
     def _search_dfs(self, seed_track_id: str, request: PlaylistRequest) -> SearchOutcome | None:
@@ -332,7 +366,7 @@ class Repository:
             last = self.get_track(path[-1])
             expansions += 1
             for neighbor in reversed(self._neighbors(last, path, request)):
-                next_cost = cost + self._edge_cost(last, neighbor, request.constraints.tempo_policy)
+                next_cost = cost + self._composite_edge_cost(last, neighbor, request)
                 stack.append((neighbor.track_id, path + [neighbor.track_id], next_cost))
         return None
 
@@ -349,7 +383,7 @@ class Repository:
             expansions += 1
             for neighbor in self._neighbors(last, path, request):
                 sequence += 1
-                next_cost = cost + self._edge_cost(last, neighbor, request.constraints.tempo_policy)
+                next_cost = cost + self._composite_edge_cost(last, neighbor, request)
                 heapq.heappush(heap, (next_cost, sequence, path + [neighbor.track_id]))
         return None
 
@@ -369,7 +403,7 @@ class Repository:
             expansions += 1
             for neighbor in self._neighbors(last, path, request):
                 sequence += 1
-                edge = self._edge_cost(last, neighbor, request.constraints.tempo_policy)
+                edge = self._composite_edge_cost(last, neighbor, request)
                 next_path = path + [neighbor.track_id]
                 next_cost = cost + edge
                 priority = next_cost + self._heuristic(neighbor, next_path, request)
@@ -393,7 +427,7 @@ class Repository:
                 return None
 
             for neighbor in self._neighbors(last, path, request):
-                next_cost = cost + self._edge_cost(last, neighbor, request.constraints.tempo_policy)
+                next_cost = cost + self._composite_edge_cost(last, neighbor, request)
                 found = depth_limited(path + [neighbor.track_id], depth_limit, next_cost)
                 if found is not None:
                     return found
@@ -425,7 +459,7 @@ class Repository:
                 return None, minimum
 
             for neighbor in self._neighbors(last, path, request):
-                edge = self._edge_cost(last, neighbor, request.constraints.tempo_policy)
+                edge = self._composite_edge_cost(last, neighbor, request)
                 result, candidate_bound = visit(path + [neighbor.track_id], g_cost + edge, bound)
                 if result is not None:
                     return result, candidate_bound
@@ -451,12 +485,73 @@ class Repository:
             if not neighbors:
                 break
             best = neighbors[0]
-            total_cost += self._edge_cost(last, best, request.constraints.tempo_policy)
+            total_cost += self._composite_edge_cost(last, best, request)
             path.append(best.track_id)
             expansions += 1
 
         target_hit = self._matches_target(self.get_track(path[-1]), request)
         return SearchOutcome(path=path, cost=total_cost, nodes_expanded=expansions, target_hit=target_hit)
+
+    def _hill_climb_refine(self, outcome: SearchOutcome, request: PlaylistRequest) -> SearchOutcome:
+        if len(outcome.path) < 3:
+            return SearchOutcome(
+                path=outcome.path,
+                cost=round(self._path_cost(outcome.path, request), 4),
+                nodes_expanded=outcome.nodes_expanded,
+                target_hit=outcome.target_hit,
+                pre_refinement_cost=outcome.cost,
+                refinement_applied=False,
+            )
+
+        best_path = outcome.path[:]
+        best_cost = self._path_cost(best_path, request)
+        original_cost = best_cost
+        improved = False
+
+        for _ in range(HILL_CLIMB_PASSES):
+            pass_improved = False
+            for position in range(1, len(best_path)):
+                previous = self.get_track(best_path[position - 1])
+                current_id = best_path[position]
+                candidate_path_base = best_path[:position] + best_path[position + 1 :]
+
+                candidates = [
+                    track
+                    for track in self._neighbors(previous, candidate_path_base, request, limit=HILL_CLIMB_CANDIDATES)
+                    if track.track_id != current_id and track.track_id not in candidate_path_base
+                ]
+
+                for candidate in candidates:
+                    candidate_path = best_path[:]
+                    candidate_path[position] = candidate.track_id
+
+                    if not self._path_respects_constraints(candidate_path, request):
+                        continue
+                    if not self._matches_target(self.get_track(candidate_path[-1]), request):
+                        continue
+
+                    candidate_cost = self._path_cost(candidate_path, request)
+                    if candidate_cost + 1e-9 < best_cost:
+                        best_path = candidate_path
+                        best_cost = candidate_cost
+                        improved = True
+                        pass_improved = True
+                        break
+
+                if pass_improved:
+                    break
+
+            if not pass_improved:
+                break
+
+        return SearchOutcome(
+            path=best_path,
+            cost=round(best_cost, 4),
+            nodes_expanded=outcome.nodes_expanded,
+            target_hit=self._matches_target(self.get_track(best_path[-1]), request),
+            pre_refinement_cost=round(original_cost, 4),
+            refinement_applied=improved,
+        )
 
     def _is_goal(self, path: list[str], request: PlaylistRequest) -> bool:
         if len(path) != request.playlist_length:
@@ -466,26 +561,41 @@ class Repository:
 
     def _matches_target(self, track: TrackRecord, request: PlaylistRequest) -> bool:
         if request.target_type == "genre":
-            return track.genre_label == request.target_value
+            return track.genre_label == request.target_value or track.cnn_genre_prediction == request.target_value
         try:
             return track.cluster_id == int(request.target_value)
         except ValueError:
             return False
 
-    def _neighbors(self, current: TrackRecord, path: list[str], request: PlaylistRequest) -> list[TrackRecord]:
-        candidates = [
-            track
-            for track in self._tracks
-            if self._can_add_to_path(track, path, request)
-        ]
-        ranked = sorted(
-            candidates,
-            key=lambda track: (
-                self._edge_cost(current, track, request.constraints.tempo_policy)
-                + self._target_penalty(track, request) * 0.4
-            ),
+    def _neighbors(self, current: TrackRecord, path: list[str], request: PlaylistRequest, limit: int = NEIGHBOR_LIMIT) -> list[TrackRecord]:
+        cache_key = (
+            current.track_id,
+            request.constraints.tempo_policy,
+            request.target_type,
+            request.target_value,
         )
-        return ranked[:NEIGHBOR_LIMIT]
+
+        ranked_ids = self._neighbor_cache.get(cache_key)
+        if ranked_ids is None:
+            ranked = sorted(
+                (track for track in self._tracks if track.track_id != current.track_id),
+                key=lambda track: (
+                    self._composite_edge_cost(current, track, request)
+                    + self._target_penalty(track, request) * 0.35
+                ),
+            )
+            ranked_ids = [track.track_id for track in ranked[: max(64, limit * 8)]]
+            self._neighbor_cache[cache_key] = ranked_ids
+
+        candidates: list[TrackRecord] = []
+        for track_id in ranked_ids:
+            track = self.get_track(track_id)
+            if self._can_add_to_path(track, path, request):
+                candidates.append(track)
+            if len(candidates) >= limit:
+                break
+
+        return candidates
 
     def _can_add_to_path(self, track: TrackRecord, path: list[str], request: PlaylistRequest) -> bool:
         if track.track_id in path:
@@ -504,13 +614,38 @@ class Repository:
 
         return True
 
+    def _path_respects_constraints(self, path: list[str], request: PlaylistRequest) -> bool:
+        tracks = [self.get_track(track_id) for track_id in path]
+
+        if request.constraints.explicit_filter and any(track.explicit for track in tracks):
+            return False
+
+        artist_counts = Counter(track.artist for track in tracks)
+        if any(count > request.constraints.artist_repeat_limit for count in artist_counts.values()):
+            return False
+
+        if request.max_total_duration_sec and sum(track.duration_sec for track in tracks) > request.max_total_duration_sec:
+            return False
+
+        return True
+
     def _heuristic(self, track: TrackRecord, path: list[str], request: PlaylistRequest) -> float:
         remaining = max(request.playlist_length - len(path), 0)
-        return self._target_penalty(track, request) + remaining * 0.08
+        return (
+            self._target_penalty(track, request)
+            + self._signal_penalty(track, request) * 0.5
+            + remaining * 0.08
+        )
 
     def _target_penalty(self, track: TrackRecord, request: PlaylistRequest) -> float:
         if request.target_type == "genre":
-            return 0.0 if track.genre_label == request.target_value else 0.75
+            if track.genre_label == request.target_value:
+                return 0.0
+            if track.cnn_genre_prediction == request.target_value:
+                confidence = track.cnn_genre_confidence if track.cnn_genre_confidence is not None else 0.5
+                return max(0.05, 0.35 * (1.0 - confidence))
+            return 0.75
+
         try:
             target_cluster = int(request.target_value)
         except ValueError:
@@ -535,6 +670,88 @@ class Repository:
             policy_penalty = max(0.0, (target.tempo or 0.0) - (source.tempo or 0.0)) / 120.0
 
         return 0.45 * tempo_delta + 0.30 * energy_delta + 0.20 * valence_delta + genre_penalty + cluster_penalty + policy_penalty
+
+    def _signal_penalty(self, track: TrackRecord, request: PlaylistRequest) -> float:
+        penalty = 0.0
+
+        if track.preference_score is not None:
+            penalty += (1.0 - track.preference_score) * 0.12
+
+        if track.mood_fit_score is not None:
+            penalty += (1.0 - track.mood_fit_score) * 0.06
+
+        if request.target_type == "genre" and track.cnn_genre_prediction:
+            confidence = track.cnn_genre_confidence if track.cnn_genre_confidence is not None else 0.5
+            if track.cnn_genre_prediction == request.target_value:
+                penalty -= confidence * 0.04
+            else:
+                penalty += confidence * 0.08
+
+        return max(0.0, penalty)
+
+    def _composite_edge_cost(self, source: TrackRecord, target: TrackRecord, request: PlaylistRequest) -> float:
+        base = self._edge_cost(source, target, request.constraints.tempo_policy)
+        return max(0.0, base + self._signal_penalty(target, request))
+
+    def _path_cost(self, path: list[str], request: PlaylistRequest) -> float:
+        if len(path) < 2:
+            return 0.0
+        total = 0.0
+        for source_id, target_id in zip(path, path[1:]):
+            total += self._composite_edge_cost(self.get_track(source_id), self.get_track(target_id), request)
+        return total
+
+    def _playlist_quality_metrics(self, outcome: SearchOutcome, request: PlaylistRequest) -> PlaylistQualityMetrics:
+        tracks = [self.get_track(track_id) for track_id in outcome.path]
+        transition_costs = [
+            self._composite_edge_cost(source, target, request)
+            for source, target in zip(tracks, tracks[1:])
+        ]
+
+        tempos = [track.tempo or 0.0 for track in tracks]
+        energies = [track.energy or 0.0 for track in tracks]
+        genres = [track.genre_label or "unknown" for track in tracks]
+        artists = [track.artist for track in tracks]
+        preferences = [track.preference_score for track in tracks if track.preference_score is not None]
+
+        if request.target_type == "genre":
+            aligned_count = sum(
+                1
+                for track in tracks
+                if track.cnn_genre_prediction == request.target_value
+                or track.genre_label == request.target_value
+            )
+            cnn_alignment = aligned_count / len(tracks) if tracks else 0.0
+        else:
+            cnn_alignment = 0.0
+
+        satisfied = 0
+        checks = 4
+
+        if not (request.constraints.explicit_filter and any(track.explicit for track in tracks)):
+            satisfied += 1
+        if all(count <= request.constraints.artist_repeat_limit for count in Counter(artists).values()):
+            satisfied += 1
+        if request.max_total_duration_sec is None or sum(track.duration_sec for track in tracks) <= request.max_total_duration_sec:
+            satisfied += 1
+        if outcome.target_hit:
+            satisfied += 1
+
+        pre = outcome.pre_refinement_cost if outcome.pre_refinement_cost is not None else outcome.cost
+        improvement = max(0.0, pre - outcome.cost)
+
+        return PlaylistQualityMetrics(
+            average_transition_cost=round(sum(transition_costs) / len(transition_costs), 4) if transition_costs else 0.0,
+            tempo_variance=round(pvariance(tempos), 4) if len(tempos) > 1 else 0.0,
+            energy_variance=round(pvariance(energies), 4) if len(energies) > 1 else 0.0,
+            genre_diversity=round(len(set(genres)) / len(genres), 4) if genres else 0.0,
+            artist_diversity=round(len(set(artists)) / len(artists), 4) if artists else 0.0,
+            preference_mean=round(sum(preferences) / len(preferences), 4) if preferences else 0.0,
+            cnn_target_alignment=round(cnn_alignment, 4),
+            constraint_satisfaction_rate=round(satisfied / checks, 4),
+            hill_climbing_improvement=round(improvement, 4),
+            refinement_applied=outcome.refinement_applied,
+        )
 
     def _describe_cluster(self, energy: float, valence: float) -> str:
         if energy < 0.4 and valence < 0.5:
