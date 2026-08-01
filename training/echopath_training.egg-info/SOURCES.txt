@@ -4,10 +4,12 @@ echopath/__main__.py
 echopath/audio_features.py
 echopath/cli.py
 echopath/config.py
+echopath/splits.py
 echopath/commands/__init__.py
 echopath/commands/benchmark_search.py
 echopath/commands/enrich_manifest.py
 echopath/commands/ingest.py
+echopath/commands/summarize_research.py
 echopath/commands/train_classical.py
 echopath/commands/train_cnn.py
 echopath_training.egg-info/PKG-INFO
@@ -16,3 +18,6 @@ echopath_training.egg-info/dependency_links.txt
 echopath_training.egg-info/entry_points.txt
 echopath_training.egg-info/requires.txt
 echopath_training.egg-info/top_level.txt
+tests/test_benchmark_search.py
+tests/test_cnn_models.py
+tests/test_training_splits.py

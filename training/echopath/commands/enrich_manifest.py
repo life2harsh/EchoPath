@@ -37,21 +37,22 @@ def _normalize_series(values: list[float]) -> dict[int, float]:
     return {idx: _clip01((value - lo) / spread) for idx, value in enumerate(values)}
 
 
-def _load_cnn_predictions(path: str | None) -> dict[str, tuple[str, float]]:
+def _load_cnn_predictions(path: str | None) -> dict[str, tuple[str, float, str | None]]:
     if not path:
         return {}
 
-    frame = pd.read_csv(Path(path).expanduser())
+    frame = pd.read_csv(Path(path).expanduser(), dtype={"track_id": str})
     required = {"track_id", "prediction", "confidence"}
     missing = required - set(frame.columns)
     if missing:
         raise SystemExit(f"CNN prediction CSV missing columns: {sorted(missing)}")
 
-    predictions: dict[str, tuple[str, float]] = {}
+    predictions: dict[str, tuple[str, float, str | None]] = {}
     for row in frame.to_dict("records"):
         predictions[str(row["track_id"])] = (
             str(row["prediction"]),
             _clip01(_to_float(row["confidence"], 0.5)),
+            str(row["split"]) if row.get("split") in {"train", "validation", "test"} else None,
         )
     return predictions
 
@@ -162,10 +163,11 @@ def run_enrich_manifest(args) -> None:
 
         track_id = str(track.get("track_id"))
         if track_id in cnn_predictions:
-            prediction, confidence = cnn_predictions[track_id]
+            prediction, confidence, evaluation_split = cnn_predictions[track_id]
             track["cnn_genre_prediction"] = prediction
             track["cnn_genre_confidence"] = round(confidence, 4)
             track["signal_source"] = "cnn_prediction_csv"
+            track["evaluation_split"] = evaluation_split
         else:
             prediction = track.get("genre_label") or "unknown"
             confidence = 0.50
