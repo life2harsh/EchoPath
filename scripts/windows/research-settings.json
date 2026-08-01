@@ -1,0 +1,23 @@
+{
+  "DatasetRoot": "",
+  "MetadataCsv": "",
+  "PythonCommand": "",
+  "InstallPythonIfMissing": true,
+  "DownloadDatasetIfMissing": true,
+  "TorchIndexUrl": "auto",
+  "AllowCpuFallback": false,
+  "Resume": true,
+  "IngestLimit": 0,
+  "AudioDurationSeconds": 30,
+  "Clusters": 8,
+  "TopClasses": 8,
+  "Classes": ["Electronic", "Experimental", "Folk", "Hip-Hop", "Instrumental", "International", "Pop", "Rock"],
+  "MaxTracksPerClass": 0,
+  "MinimumTracksPerClass": 10,
+  "CnnArchitecture": "all",
+  "CnnEpochs": 20,
+  "CnnBatchSize": 8,
+  "SearchCases": 5,
+  "SearchRepetitions": 3,
+  "MaximumZipFileSizeMb": 100
+}

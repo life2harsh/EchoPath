@@ -56,9 +56,9 @@ export ECHOPATH_LIBRARY_PATH=/absolute/path/to/tracks.json
 
 The manifest should follow the same schema used in `artifacts/sample-data/demo_library.json`.
 
-## Training Scaffold
+## Research Pipeline
 
-The training package is intentionally lightweight for now, but the command surface is ready:
+The training package provides reproducible ingestion, artist-isolated splits, classical and CNN evaluation, search benchmarks, ablations, and report generation:
 
 ```bash
 cd training
@@ -67,12 +67,11 @@ source ../.venv/bin/activate
 pip install -e .
 echopath ingest --dataset-root /path/to/fma
 echopath train-classical
-echopath train-cnn --hf-repo your-org/echopath-models
+echopath train-cnn --architecture all --mixed-precision
 echopath benchmark-search
+echopath summarize-research --results-root /path/to/results
 ```
 
-## Next Steps
+For the reproducible Windows GPU workflow, see `docs/RESEARCH_WORKFLOW.md` or double-click `RUN_ECHOPATH_RESEARCH.bat`. The launcher can install Python and download FMA Small automatically.
 
-1. Plug in the real dataset manifest and local audio files.
-2. Replace sample analytics with feature-extracted outputs.
-3. Expand the training commands into full data pipelines and model jobs.
+Experiment artifacts include split assignments, configurations, predictions, classification reports, confusion matrices, raw benchmark runs, aggregate confidence intervals, figures, and checksums.
