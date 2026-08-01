@@ -30,6 +30,7 @@ class TrackRecord(BaseModel):
     cnn_genre_prediction: str | None = None
     cnn_genre_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     signal_source: str | None = None
+    evaluation_split: Literal["train", "validation", "test"] | None = None
 
 
 class TrackAnalysisResponse(BaseModel):

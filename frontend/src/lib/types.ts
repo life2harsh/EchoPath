@@ -23,6 +23,7 @@ export interface TrackRecord {
   cnn_genre_prediction: string | null;
   cnn_genre_confidence: number | null;
   signal_source: string | null;
+  evaluation_split: "train" | "validation" | "test" | null;
 }
 
 export interface TrackAnalysisResponse {

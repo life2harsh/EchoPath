@@ -4,6 +4,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 import heapq
 import json
+import math
 import mimetypes
 from pathlib import Path
 from statistics import pvariance
@@ -58,6 +59,7 @@ class Repository:
         self._track_index: dict[str, TrackRecord] = {}
         self._playlists: dict[str, PlaylistResult] = {}
         self._neighbor_cache: dict[tuple[str, str, str, str], list[str]] = {}
+        self._cluster_centroids: dict[int, tuple[float, float, float]] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -67,6 +69,14 @@ class Repository:
 
         self._tracks = [self._attach_urls(track) for track in raw_tracks]
         self._track_index = {track.track_id: track for track in self._tracks}
+        cluster_points: dict[int, list[tuple[float, float, float]]] = {}
+        for track in self._tracks:
+            if track.cluster_id is not None:
+                cluster_points.setdefault(track.cluster_id, []).append(self._feature_point(track))
+        self._cluster_centroids = {
+            cluster_id: tuple(sum(point[index] for point in points) / len(points) for index in range(3))
+            for cluster_id, points in cluster_points.items()
+        }
         self._neighbor_cache.clear()
         self._dataset_status = DatasetStatus(
             source=str(data_path),
@@ -348,6 +358,8 @@ class Repository:
             _, path, cost = queue.popleft()
             if self._is_goal(path, request):
                 return SearchOutcome(path=path, cost=cost, nodes_expanded=expansions, target_hit=True)
+            if len(path) >= request.playlist_length:
+                continue
 
             last = self.get_track(path[-1])
             expansions += 1
@@ -362,6 +374,8 @@ class Repository:
             _, path, cost = stack.pop()
             if self._is_goal(path, request):
                 return SearchOutcome(path=path, cost=cost, nodes_expanded=expansions, target_hit=True)
+            if len(path) >= request.playlist_length:
+                continue
 
             last = self.get_track(path[-1])
             expansions += 1
@@ -378,6 +392,8 @@ class Repository:
             cost, _, path = heapq.heappop(heap)
             if self._is_goal(path, request):
                 return SearchOutcome(path=path, cost=cost, nodes_expanded=expansions, target_hit=True)
+            if len(path) >= request.playlist_length:
+                continue
 
             last = self.get_track(path[-1])
             expansions += 1
@@ -398,6 +414,8 @@ class Repository:
             _, cost, _, path = heapq.heappop(heap)
             if self._is_goal(path, request):
                 return SearchOutcome(path=path, cost=cost, nodes_expanded=expansions, target_hit=True)
+            if len(path) >= request.playlist_length:
+                continue
 
             last = self.get_track(path[-1])
             expansions += 1
@@ -452,6 +470,8 @@ class Repository:
                 return None, f_cost
             if self._is_goal(path, request):
                 return SearchOutcome(path=path, cost=g_cost, nodes_expanded=expansions, target_hit=True), f_cost
+            if len(path) >= request.playlist_length:
+                return None, float("inf")
 
             minimum = float("inf")
             expansions += 1
@@ -652,7 +672,16 @@ class Repository:
             return 1.0
         if track.cluster_id is None:
             return 1.0
-        return abs(track.cluster_id - target_cluster) * 0.35
+        if track.cluster_id == target_cluster:
+            return 0.0
+        target_centroid = self._cluster_centroids.get(target_cluster)
+        if target_centroid is None:
+            return 1.0
+        point = self._feature_point(track)
+        return math.sqrt(sum((point[index] - target_centroid[index]) ** 2 for index in range(3)))
+
+    def _feature_point(self, track: TrackRecord) -> tuple[float, float, float]:
+        return ((track.tempo or 0.0) / 120.0, track.energy or 0.0, track.valence or 0.0)
 
     def _edge_cost(self, source: TrackRecord, target: TrackRecord, tempo_policy: str) -> float:
         tempo_delta = abs((source.tempo or 0.0) - (target.tempo or 0.0)) / 120.0
