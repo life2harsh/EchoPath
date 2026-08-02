@@ -22,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--audio-duration", dest="audio_duration", type=float, default=30.0)
     ingest.add_argument("--clusters", type=int, default=8)
     ingest.add_argument("--limit", type=int, default=None)
+    ingest.add_argument("--resume", action="store_true")
+    ingest.add_argument("--checkpoint-every", type=int, default=100)
 
     enrich = subparsers.add_parser("enrich-manifest", help="Add ML/CNN integration signals to the backend manifest.")
     enrich.add_argument("--manifest", required=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -126,11 +127,18 @@ def _assign_clusters(records: list[dict[str, Any]], cluster_count: int) -> None:
         record["cluster_id"] = int(label)
 
 
+def _write_json_atomic(payload: Any, path: Path) -> None:
+    temporary = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
 def run_ingest(args) -> None:
     config = load_config(args.dataset_root)
     dataset_root = config.dataset_root.expanduser().resolve()
     manifest_path = Path(args.output_manifest).expanduser() if args.output_manifest else config.manifest_path
     features_csv = Path(args.features_csv).expanduser() if args.features_csv else config.artifacts_dir / "features.csv"
+    checkpoint_path = manifest_path.with_suffix(manifest_path.suffix + ".partial.json")
 
     metadata_csv = _find_metadata_csv(dataset_root, args.metadata_csv)
     metadata_by_id = _load_fma_metadata(metadata_csv)
@@ -147,13 +155,26 @@ def run_ingest(args) -> None:
 
     records: list[dict[str, Any]] = []
     failures: list[str] = []
+    completed_ids: set[str] = set()
+    if bool(getattr(args, "resume", False)) and checkpoint_path.exists():
+        saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if isinstance(saved, list):
+            records = saved
+            completed_ids = {str(record.get("track_id")) for record in records}
+            print(f"Resuming from checkpoint: {len(records)} tracks")
 
     for index, audio_path in enumerate(audio_files, start=1):
         track_id = audio_path.stem.zfill(6) if audio_path.stem.isdigit() else audio_path.stem
+        if track_id in completed_ids:
+            continue
         try:
             features = extract_audio_features(audio_path, duration=args.audio_duration)
             record = _build_track_record(audio_path, dataset_root, metadata_by_id.get(track_id, {}), features)
             records.append(record)
+            completed_ids.add(track_id)
+            checkpoint_every = max(1, int(getattr(args, "checkpoint_every", 100)))
+            if len(records) % checkpoint_every == 0:
+                _write_json_atomic(records, checkpoint_path)
             print(f"[{index}/{len(audio_files)}] ok {track_id} {record['title']}")
         except Exception as exc:
             failures.append(f"{audio_path}: {exc}")
@@ -167,8 +188,10 @@ def run_ingest(args) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     features_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    manifest_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
+    _write_json_atomic(records, manifest_path)
     pd.DataFrame(records).to_csv(features_csv, index=False)
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
 
     print("")
     print("Ingest complete")
