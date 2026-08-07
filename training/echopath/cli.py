@@ -5,9 +5,9 @@ import argparse
 from .commands.benchmark_search import ABLATIONS, ALGORITHMS, run_benchmark_search
 from .commands.enrich_manifest import run_enrich_manifest
 from .commands.ingest import run_ingest
+from .commands.import_fma_features import run_import_fma_features
 from .commands.summarize_research import run_summarize_research
 from .commands.train_classical import run_train_classical
-from .commands.train_cnn import run_train_cnn
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +24,14 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--limit", type=int, default=None)
     ingest.add_argument("--resume", action="store_true")
     ingest.add_argument("--checkpoint-every", type=int, default=100)
+
+    import_fma = subparsers.add_parser("import-fma-features", help="Build EchoPath artifacts from FMA's official feature archive.")
+    import_fma.add_argument("--dataset-root", required=True)
+    import_fma.add_argument("--metadata-csv", required=True)
+    import_fma.add_argument("--fma-features-csv", required=True)
+    import_fma.add_argument("--output-manifest", required=True)
+    import_fma.add_argument("--features-csv", required=True)
+    import_fma.add_argument("--clusters", type=int, default=16)
 
     enrich = subparsers.add_parser("enrich-manifest", help="Add ML/CNN integration signals to the backend manifest.")
     enrich.add_argument("--manifest", required=True)
@@ -116,6 +124,9 @@ def main() -> None:
     if args.command == "ingest":
         run_ingest(args)
         return
+    if args.command == "import-fma-features":
+        run_import_fma_features(args)
+        return
     if args.command == "enrich-manifest":
         run_enrich_manifest(args)
         return
@@ -123,6 +134,8 @@ def main() -> None:
         run_train_classical(args)
         return
     if args.command == "train-cnn":
+        from .commands.train_cnn import run_train_cnn
+
         run_train_cnn(args)
         return
     if args.command == "benchmark-search":

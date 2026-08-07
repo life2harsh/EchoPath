@@ -139,6 +139,8 @@ def run_ingest(args) -> None:
     manifest_path = Path(args.output_manifest).expanduser() if args.output_manifest else config.manifest_path
     features_csv = Path(args.features_csv).expanduser() if args.features_csv else config.artifacts_dir / "features.csv"
     checkpoint_path = manifest_path.with_suffix(manifest_path.suffix + ".partial.json")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    features_csv.parent.mkdir(parents=True, exist_ok=True)
 
     metadata_csv = _find_metadata_csv(dataset_root, args.metadata_csv)
     metadata_by_id = _load_fma_metadata(metadata_csv)
@@ -184,9 +186,6 @@ def run_ingest(args) -> None:
         raise SystemExit("Feature extraction failed for every audio file.")
 
     _assign_clusters(records, args.clusters)
-
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    features_csv.parent.mkdir(parents=True, exist_ok=True)
 
     _write_json_atomic(records, manifest_path)
     pd.DataFrame(records).to_csv(features_csv, index=False)
