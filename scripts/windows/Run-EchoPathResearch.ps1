@@ -45,7 +45,12 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments, [string]$Descrip
 function Invoke-Native([string]$Program, [string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
     try {
-        $output = & $Program @Arguments 2>$null
+        $arguments = @($Arguments | Where-Object { -not [string]::IsNullOrEmpty($_) })
+        if ($arguments.Count -eq 0) {
+            $output = & $Program 2>$null
+        } else {
+            $output = & $Program @arguments 2>$null
+        }
         return @{ ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { "$_" }) }
     } catch {
         return @{ ExitCode = -1; Output = @() }
@@ -294,49 +299,77 @@ function Resolve-Metadata([string]$ConfiguredPath, [string]$DatasetRoot, [bool]$
     throw "FMA tracks.csv was not found. Set DownloadDatasetIfMissing to true or set MetadataCsv in $SettingsPath."
 }
 
-function Get-CudaInfo {
-    $query = Invoke-Native "nvidia-smi" @("--query-gpu=name", "--format=csv,noheader")
-    if ($query.ExitCode -ne 0) {
-        return @{ Found = $false; Version = $null; Name = $null; Details = $null }
+function Get-CudaFromDriver([string]$Driver) {
+    $driverVersion = $null
+    if (-not [version]::TryParse($Driver, [ref]$driverVersion)) {
+        return $null
     }
-    $full = (Invoke-Native "nvidia-smi" @()).Output -join "`n"
-    $cudaVersion = $null
-    if ($full -match "CUDA Version:\s*([0-9]+\.[0-9]+)") {
-        $cudaVersion = [version]$Matches[1]
+    $table = @(
+        @("570.65", "12.8"),
+        @("560.76", "12.6"),
+        @("551.61", "12.4"),
+        @("531.14", "12.1"),
+        @("520.06", "11.8")
+    )
+    foreach ($row in $table) {
+        if ($driverVersion -ge [version]$row[0]) {
+            return [version]$row[1]
+        }
     }
-    return @{ Found = $true; Version = $cudaVersion; Name = ([string]($query.Output | Select-Object -First 1)).Trim(); Details = $full.Trim() }
+    return $null
 }
 
-function Resolve-TorchIndex([string]$Setting, $CudaInfo) {
+function Get-CudaInfo {
+    $query = Invoke-Native "nvidia-smi" @("--query-gpu=name,driver_version", "--format=csv,noheader")
+    if ($query.ExitCode -ne 0 -or $query.Output.Count -eq 0) {
+        return @{ Found = $false; Version = $null; Name = $null; Driver = $null; Details = $null }
+    }
+    $fields = ([string]($query.Output | Select-Object -First 1)).Split(",")
+    $name = $fields[0].Trim()
+    $driver = if ($fields.Count -gt 1) { $fields[1].Trim() } else { "" }
+    $details = (Invoke-Native "nvidia-smi" @("-q", "-d", "COMPUTE")).Output -join "`n"
+    $cudaVersion = $null
+    if ($details -match "CUDA Version\s*:?\s*([0-9]+\.[0-9]+)") {
+        $cudaVersion = [version]$Matches[1]
+    }
+    $driverCuda = Get-CudaFromDriver $driver
+    if (-not $cudaVersion -or ($driverCuda -and $driverCuda -gt $cudaVersion)) {
+        $cudaVersion = $driverCuda
+    }
+    return @{ Found = $true; Version = $cudaVersion; Name = $name; Driver = $driver; Details = $details.Trim() }
+}
+
+function Resolve-TorchIndexes([string]$Setting, $CudaInfo) {
     $override = $env:ECHOPATH_TORCH_INDEX_URL
     if (-not [string]::IsNullOrWhiteSpace($override)) {
         $Setting = $override
     }
     if ($Setting -ne "auto") {
         if ($Setting -match "^https?://") {
-            return $Setting.TrimEnd("/")
+            return ,@($Setting.TrimEnd("/"))
         }
-        return "https://download.pytorch.org/whl/$Setting"
+        return ,@("https://download.pytorch.org/whl/$Setting")
     }
-    if (-not $CudaInfo.Found -or -not $CudaInfo.Version) {
-        return "https://download.pytorch.org/whl/cpu"
+    if (-not $CudaInfo.Found) {
+        return ,@("https://download.pytorch.org/whl/cpu")
     }
-    if ($CudaInfo.Version -ge [version]"12.8") {
-        return "https://download.pytorch.org/whl/cu128"
+    $builds = @(
+        @("12.8", "cu128"),
+        @("12.6", "cu126"),
+        @("12.4", "cu124"),
+        @("12.1", "cu121"),
+        @("11.8", "cu118")
+    )
+    $indexes = @()
+    foreach ($build in $builds) {
+        if (-not $CudaInfo.Version -or $CudaInfo.Version -ge [version]$build[0]) {
+            $indexes += "https://download.pytorch.org/whl/$($build[1])"
+        }
     }
-    if ($CudaInfo.Version -ge [version]"12.6") {
-        return "https://download.pytorch.org/whl/cu126"
+    if ($indexes.Count -eq 0) {
+        throw "The NVIDIA driver is too old (CUDA $($CudaInfo.Version)). Install the latest driver from https://www.nvidia.com/Download/index.aspx and run this file again."
     }
-    if ($CudaInfo.Version -ge [version]"12.4") {
-        return "https://download.pytorch.org/whl/cu124"
-    }
-    if ($CudaInfo.Version -ge [version]"12.1") {
-        return "https://download.pytorch.org/whl/cu121"
-    }
-    if ($CudaInfo.Version -ge [version]"11.8") {
-        return "https://download.pytorch.org/whl/cu118"
-    }
-    throw "The NVIDIA driver is too old (CUDA $($CudaInfo.Version)). Install the latest driver from https://www.nvidia.com/Download/index.aspx and run this file again."
+    return ,$indexes
 }
 
 function Test-TorchGpu([string]$Python) {
@@ -653,6 +686,7 @@ try {
     $Cuda = Get-CudaInfo
     if ($Cuda.Found) {
         Write-Host "NVIDIA GPU: $($Cuda.Name)"
+        Write-Host "NVIDIA driver: $($Cuda.Driver)"
         Write-Host "Driver-reported CUDA: $($Cuda.Version)"
         Write-Host $Cuda.Details
     } else {
@@ -661,7 +695,7 @@ try {
             throw "No NVIDIA GPU driver was found. Install the latest driver from https://www.nvidia.com/Download/index.aspx (or set AllowCpuFallback to true), then run this file again."
         }
     }
-    $TorchIndex = Resolve-TorchIndex ([string]$Settings.TorchIndexUrl) $Cuda
+    $TorchIndexes = Resolve-TorchIndexes ([string]$Settings.TorchIndexUrl) $Cuda
 
     $Python = Resolve-Python ([string]$Settings.PythonCommand) ([bool]$Settings.InstallPythonIfMissing)
     $GitRevision = "unavailable"
@@ -695,9 +729,13 @@ try {
         Invoke-Checked $Python.Program (@($Python.Prefix) + @("-m", "venv", $VenvRoot)) "Create virtual environment"
     }
     Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel") "Update packaging tools"
-    Write-Host "PyTorch wheel index: $TorchIndex"
     $TorchMarker = Join-Path $VenvRoot "echopath-torch-index.txt"
     $PreviousTorchIndex = if (Test-Path $TorchMarker -PathType Leaf) { (Get-Content $TorchMarker -Raw).Trim() } else { "" }
+    $TorchIndex = $TorchIndexes[0]
+    if ($PreviousTorchIndex -and $TorchIndexes -contains $PreviousTorchIndex) {
+        $TorchIndex = $PreviousTorchIndex
+    }
+    Write-Host "PyTorch wheel index: $TorchIndex"
     $TorchArguments = @("-m", "pip", "install", "--index-url", $TorchIndex, "torch>=2.5,<3.0")
     if ($PreviousTorchIndex -and $PreviousTorchIndex -ne $TorchIndex) {
         $TorchArguments += @("--force-reinstall", "--no-deps")
@@ -708,13 +746,23 @@ try {
 
     Write-Stage "GPU check"
     $GpuStatus = Test-TorchGpu $VenvPython
-    if ($Cuda.Found -and $GpuStatus -eq 3) {
-        Write-Host "A CPU-only PyTorch build is installed; replacing it with the GPU build."
-        Invoke-Checked $VenvPython @("-m", "pip", "install", "--index-url", $TorchIndex, "torch>=2.5,<3.0", "--force-reinstall", "--no-deps") "Reinstall PyTorch"
-        $GpuStatus = Test-TorchGpu $VenvPython
+    if ($Cuda.Found -and $GpuStatus -ne 0) {
+        foreach ($candidate in $TorchIndexes) {
+            if ($candidate -eq $TorchIndex) {
+                continue
+            }
+            Write-Host "PyTorch from $TorchIndex cannot use the GPU. Trying $candidate"
+            Invoke-Checked $VenvPython @("-m", "pip", "install", "--index-url", $candidate, "torch>=2.5,<3.0", "--force-reinstall", "--no-deps") "Reinstall PyTorch"
+            $TorchIndex = $candidate
+            Set-Content $TorchMarker $TorchIndex -Encoding ASCII
+            $GpuStatus = Test-TorchGpu $VenvPython
+            if ($GpuStatus -eq 0) {
+                break
+            }
+        }
     }
     if ($Cuda.Found -and $GpuStatus -ne 0) {
-        throw "PyTorch cannot run on this GPU ($($Cuda.Name)). Install the latest NVIDIA driver from https://www.nvidia.com/Download/index.aspx, restart the computer, and run this file again."
+        throw "PyTorch cannot run on this GPU ($($Cuda.Name), driver $($Cuda.Driver)). Install the latest NVIDIA driver from https://www.nvidia.com/Download/index.aspx, restart the computer, and run this file again."
     }
     if (-not $Cuda.Found) {
         Write-Warning "Continuing on the CPU because AllowCpuFallback is true. CNN training will be very slow."
