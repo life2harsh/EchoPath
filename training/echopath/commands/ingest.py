@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 import json
 import os
 from pathlib import Path
@@ -96,6 +97,43 @@ def _extract_one(job: tuple[str, float]) -> tuple[str, dict[str, float] | None, 
         return audio_path, None, f"{type(exc).__name__}: {exc}"
 
 
+def _extract_all(jobs: list[tuple[str, float]], workers: int, max_consecutive_crashes: int = 5):
+    pending = list(jobs)
+    pool_size = max(1, workers)
+    consecutive_crashes = 0
+    while pending:
+        executor = ProcessPoolExecutor(max_workers=pool_size)
+        futures = {executor.submit(_extract_one, job): index for index, job in enumerate(pending)}
+        unfinished: list[int] = []
+        try:
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except BrokenProcessPool:
+                    unfinished.append(futures[future])
+                    continue
+                consecutive_crashes = 0
+                yield result
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+        if not unfinished:
+            return
+        unfinished.sort()
+        remaining = [pending[index] for index in unfinished]
+        if pool_size > 1:
+            pool_size = max(1, pool_size // 2)
+            print(f"A decoding worker crashed; retrying {len(remaining)} files with {pool_size} worker(s)")
+            pending = remaining
+            continue
+        crashed_path = remaining[0][0]
+        consecutive_crashes += 1
+        if consecutive_crashes >= max_consecutive_crashes:
+            raise SystemExit(f"Audio decoding crashed on {consecutive_crashes} files in a row, last one {crashed_path}")
+        yield crashed_path, None, "decoder process crashed on this file"
+        pending = remaining[1:]
+        pool_size = max(1, workers)
+
+
 def _build_track_record(audio_path: Path, dataset_root: Path, metadata: dict[str, Any], features: dict[str, float]) -> dict[str, Any]:
     track_id = _track_id(audio_path)
     title = metadata.get("title") or audio_path.stem
@@ -180,10 +218,8 @@ def run_ingest(args) -> None:
     print(f"Extracting features for {len(pending)} files with {workers} worker(s)")
 
     jobs = [(str(path), float(args.audio_duration)) for path in pending]
-    executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
-    results = executor.map(_extract_one, jobs, chunksize=4) if executor else map(_extract_one, jobs)
     try:
-        for done, (audio_path_text, features, error) in enumerate(results, start=1):
+        for done, (audio_path_text, features, error) in enumerate(_extract_all(jobs, workers), start=1):
             audio_path = Path(audio_path_text)
             track_id = _track_id(audio_path)
             prefix = f"[{len(audio_files) - len(pending) + done}/{len(audio_files)}]"
@@ -198,8 +234,6 @@ def run_ingest(args) -> None:
                 _write_json_atomic(records, checkpoint_path)
             print(f"{prefix} ok {track_id} {record['title']}")
     finally:
-        if executor is not None:
-            executor.shutdown(cancel_futures=True)
         if records:
             _write_json_atomic(records, checkpoint_path)
 
