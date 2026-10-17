@@ -72,6 +72,6 @@ echopath benchmark-search
 echopath summarize-research --results-root /path/to/results
 ```
 
-For the reproducible Windows GPU workflow, see `docs/RESEARCH_WORKFLOW.md` or double-click `RUN_ECHOPATH_RESEARCH.bat`. The launcher can install Python and download FMA Small automatically.
+For the reproducible Windows GPU workflow, see `docs/RESEARCH_WORKFLOW.md` or double-click `RUN_ECHOPATH_RESEARCH.bat` (operator instructions are in `START_HERE.txt`). The launcher can install Python and download FMA Small automatically.
 
 Experiment artifacts include split assignments, configurations, predictions, classification reports, confusion matrices, raw benchmark runs, aggregate confidence intervals, figures, and checksums.

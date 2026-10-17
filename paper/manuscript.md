@@ -89,7 +89,7 @@ The comparison includes logistic regression, linear SVM, RBF SVM, random forest,
 
 ### 4.5 Convolutional models
 
-The CNN comparison includes LeNet-style, VGG-style, and ResNet-style architectures operating on normalized mel spectrograms. Spectrogram tensors are cached with a preprocessing schema fingerprint. Training supports CUDA mixed precision and resumable deterministic checkpoints. The selected architecture exports per-track predictions and confidence scores for downstream playlist experiments.
+The CNN comparison includes LeNet-style, VGG-style, and ResNet-style architectures operating on per-clip normalized log-mel spectrograms of the full 30-second clip (22.05 kHz mono, 64 mel bands, 2,048-sample FFT window, 512-sample hop, 1,292 frames). Spectrogram tensors are cached with a preprocessing schema fingerprint. Training supports CUDA mixed precision and resumable deterministic checkpoints. The selected architecture exports per-track predictions and confidence scores for downstream playlist experiments.
 
 ## 5. Playlist Search Methods
 

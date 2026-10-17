@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 
 from .commands.benchmark_search import ABLATIONS, ALGORITHMS, run_benchmark_search
 from .commands.enrich_manifest import run_enrich_manifest
@@ -24,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--limit", type=int, default=None)
     ingest.add_argument("--resume", action="store_true")
     ingest.add_argument("--checkpoint-every", type=int, default=100)
+    ingest.add_argument("--workers", type=int, default=0, help="Feature-extraction processes; 0 picks automatically.")
 
     import_fma = subparsers.add_parser("import-fma-features", help="Build EchoPath artifacts from FMA's official feature archive.")
     import_fma.add_argument("--dataset-root", required=True)
@@ -80,12 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_cnn.add_argument("--audio-duration", type=float, default=30.0)
     train_cnn.add_argument("--sample-rate", type=int, default=22_050)
     train_cnn.add_argument("--n-mels", type=int, default=64)
-    train_cnn.add_argument("--frames", type=int, default=128)
+    train_cnn.add_argument("--frames", type=int, default=None, help="Spectrogram frames; default covers the full --audio-duration clip.")
     train_cnn.add_argument("--min-per-class", type=int, default=5)
     train_cnn.add_argument("--mixed-precision", action="store_true")
     train_cnn.add_argument("--cache-dir", default=None)
     train_cnn.add_argument("--resume", action="store_true")
     train_cnn.add_argument("--num-workers", type=int, default=0)
+    train_cnn.add_argument("--preprocess-workers", type=int, default=0, help="Processes for spectrogram caching; 0 picks automatically.")
     train_cnn.add_argument("--output-dir", default="artifacts/models/cnn")
 
     benchmark = subparsers.add_parser("benchmark-search", help="Run reproducible search experiments and baselines.")
@@ -117,7 +121,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _Tee:
+    def __init__(self, stream, log) -> None:
+        self._stream = stream
+        self._log = log
+
+    def write(self, text: str) -> int:
+        self._stream.write(text)
+        self._log.write(text)
+        self._log.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._log.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
+def _install_log_tee() -> None:
+    log_path = os.environ.get("ECHOPATH_LOG_FILE")
+    if not log_path:
+        return
+    log = open(log_path, "a", encoding="utf-8", errors="replace")
+    log.write(f"\n===== echopath {' '.join(sys.argv[1:])} =====\n")
+    sys.stdout = _Tee(sys.stdout, log)
+    sys.stderr = _Tee(sys.stderr, log)
+
+
 def main() -> None:
+    _install_log_tee()
     parser = build_parser()
     args = parser.parse_args()
 

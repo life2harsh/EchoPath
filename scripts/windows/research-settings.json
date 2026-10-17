@@ -9,6 +9,7 @@
   "Resume": true,
   "IngestLimit": 0,
   "AudioDurationSeconds": 30,
+  "Workers": 0,
   "Clusters": 8,
   "TopClasses": 8,
   "Classes": ["Electronic", "Experimental", "Folk", "Hip-Hop", "Instrumental", "International", "Pop", "Rock"],

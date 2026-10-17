@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 from ..audio_features import extract_audio_features, feature_columns, find_audio_files, safe_float
 from ..config import load_config
+from ..mel import default_workers
 
 
 def _find_metadata_csv(dataset_root: Path, explicit_path: str | None) -> Path | None:
@@ -29,17 +31,12 @@ def _find_metadata_csv(dataset_root: Path, explicit_path: str | None) -> Path | 
 
 
 def _load_fma_metadata(metadata_csv: Path | None) -> dict[str, dict[str, Any]]:
-    """
-    Load FMA tracks.csv if available. FMA metadata uses two CSV header rows.
-    Returns keys as zero-padded six-digit track IDs, matching the mp3 file names.
-    """
     if metadata_csv is None:
         return {}
 
     try:
         frame = pd.read_csv(metadata_csv, header=[0, 1], index_col=0)
     except Exception:
-        # Fallback for a simple one-row-header CSV.
         simple = pd.read_csv(metadata_csv)
         result: dict[str, dict[str, Any]] = {}
         for _, row in simple.iterrows():
@@ -87,8 +84,20 @@ def _duration_seconds(audio_path: Path, metadata_value: Any) -> int:
         return 180
 
 
+def _track_id(audio_path: Path) -> str:
+    return audio_path.stem.zfill(6) if audio_path.stem.isdigit() else audio_path.stem
+
+
+def _extract_one(job: tuple[str, float]) -> tuple[str, dict[str, float] | None, str | None]:
+    audio_path, duration = job
+    try:
+        return audio_path, extract_audio_features(audio_path, duration=duration), None
+    except Exception as exc:
+        return audio_path, None, f"{type(exc).__name__}: {exc}"
+
+
 def _build_track_record(audio_path: Path, dataset_root: Path, metadata: dict[str, Any], features: dict[str, float]) -> dict[str, Any]:
-    track_id = audio_path.stem.zfill(6) if audio_path.stem.isdigit() else audio_path.stem
+    track_id = _track_id(audio_path)
     title = metadata.get("title") or audio_path.stem
     artist = metadata.get("artist") or "Unknown Artist"
     genre_label = metadata.get("genre_label") or "unknown"
@@ -165,22 +174,36 @@ def run_ingest(args) -> None:
             completed_ids = {str(record.get("track_id")) for record in records}
             print(f"Resuming from checkpoint: {len(records)} tracks")
 
-    for index, audio_path in enumerate(audio_files, start=1):
-        track_id = audio_path.stem.zfill(6) if audio_path.stem.isdigit() else audio_path.stem
-        if track_id in completed_ids:
-            continue
-        try:
-            features = extract_audio_features(audio_path, duration=args.audio_duration)
+    pending = [path for path in audio_files if _track_id(path) not in completed_ids]
+    workers = int(getattr(args, "workers", 0) or default_workers())
+    checkpoint_every = max(1, int(getattr(args, "checkpoint_every", 100)))
+    print(f"Extracting features for {len(pending)} files with {workers} worker(s)")
+
+    jobs = [(str(path), float(args.audio_duration)) for path in pending]
+    executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    results = executor.map(_extract_one, jobs, chunksize=4) if executor else map(_extract_one, jobs)
+    try:
+        for done, (audio_path_text, features, error) in enumerate(results, start=1):
+            audio_path = Path(audio_path_text)
+            track_id = _track_id(audio_path)
+            prefix = f"[{len(audio_files) - len(pending) + done}/{len(audio_files)}]"
+            if error is not None:
+                failures.append(f"{audio_path}: {error}")
+                print(f"{prefix} failed {audio_path}: {error}")
+                continue
             record = _build_track_record(audio_path, dataset_root, metadata_by_id.get(track_id, {}), features)
             records.append(record)
             completed_ids.add(track_id)
-            checkpoint_every = max(1, int(getattr(args, "checkpoint_every", 100)))
             if len(records) % checkpoint_every == 0:
                 _write_json_atomic(records, checkpoint_path)
-            print(f"[{index}/{len(audio_files)}] ok {track_id} {record['title']}")
-        except Exception as exc:
-            failures.append(f"{audio_path}: {exc}")
-            print(f"[{index}/{len(audio_files)}] failed {audio_path}: {exc}")
+            print(f"{prefix} ok {track_id} {record['title']}")
+    finally:
+        if executor is not None:
+            executor.shutdown(cancel_futures=True)
+        if records:
+            _write_json_atomic(records, checkpoint_path)
+
+    records.sort(key=lambda record: str(record["track_id"]))
 
     if not records:
         raise SystemExit("Feature extraction failed for every audio file.")
@@ -197,8 +220,9 @@ def run_ingest(args) -> None:
     print(f"Tracks written: {len(records)}")
     print(f"Manifest: {manifest_path}")
     print(f"Features CSV: {features_csv}")
+    failure_log = manifest_path.parent / "ingest_failures.txt"
     if failures:
-        failure_log = config.artifacts_dir / "ingest_failures.txt"
-        failure_log.parent.mkdir(parents=True, exist_ok=True)
         failure_log.write_text("\n".join(failures), encoding="utf-8")
         print(f"Failures: {len(failures)} written to {failure_log}")
+    elif failure_log.exists():
+        failure_log.unlink()

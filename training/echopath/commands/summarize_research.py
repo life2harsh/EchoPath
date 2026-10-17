@@ -50,6 +50,9 @@ def _artifact_paths(results_root: Path) -> list[Path]:
     fixed = [
         "data/splits.csv",
         "data/splits.csv.metadata.json",
+        "data/features.csv",
+        "data/tracks_enriched.json",
+        "data/ingest_failures.txt",
         "classical/validation_metrics.csv",
         "classical/validation_predictions.csv",
         "classical/class_distribution.csv",

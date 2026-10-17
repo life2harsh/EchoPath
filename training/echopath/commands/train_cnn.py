@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-import hashlib
+from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 import platform
@@ -10,7 +10,6 @@ import random
 import sys
 from typing import Any
 
-import librosa
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score
@@ -20,13 +19,18 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+from ..mel import CACHE_SCHEMA, cache_path, default_workers, frames_for_duration, load_or_compute, warm_cache_entry
 from ..splits import load_or_create_splits, track_identity
-
-CACHE_SCHEMA = "mel-v1-librosa-0.11"
-
 
 def _arg(args: Any, name: str, default: Any) -> Any:
     return getattr(args, name, default)
+
+
+def _frames(args: Any) -> int:
+    configured = _arg(args, "frames", None)
+    if configured:
+        return int(configured)
+    return frames_for_duration(float(_arg(args, "audio_duration", 30.0)), int(_arg(args, "sample_rate", 22_050)))
 
 
 def _set_determinism(seed: int) -> None:
@@ -125,45 +129,6 @@ def _training_indices(
     return np.array(sorted(selected), dtype=int)
 
 
-def _mel_tensor(
-    audio_path: str,
-    sample_rate: int,
-    audio_duration: float,
-    n_mels: int,
-    frames: int,
-) -> torch.Tensor:
-    y, sr = librosa.load(
-        audio_path,
-        sr=sample_rate,
-        mono=True,
-        duration=audio_duration,
-    )
-
-    if y is None or len(y) == 0:
-        raise ValueError(f"Empty audio: {audio_path}")
-
-    mel = librosa.feature.melspectrogram(
-        y=y,
-        sr=sr,
-        n_fft=2048,
-        hop_length=512,
-        n_mels=n_mels,
-    )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-
-    if mel_db.shape[1] < frames:
-        pad_width = frames - mel_db.shape[1]
-        mel_db = np.pad(mel_db, ((0, 0), (0, pad_width)), mode="constant")
-    else:
-        mel_db = mel_db[:, :frames]
-
-    mean = float(mel_db.mean())
-    std = float(mel_db.std()) or 1.0
-    mel_db = (mel_db - mean) / std
-
-    return torch.tensor(mel_db, dtype=torch.float32).unsqueeze(0)
-
-
 class SpectrogramDataset(Dataset):
     def __init__(
         self,
@@ -190,27 +155,45 @@ class SpectrogramDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         track = self.tracks[index]
         audio_path = Path(str(track["audio_path"])).expanduser().resolve()
-        stat = audio_path.stat()
-        cache_payload = (
-            f"{CACHE_SCHEMA}:{audio_path}:{stat.st_size}:{stat.st_mtime_ns}:{self.sample_rate}:"
-            f"{self.audio_duration}:{self.n_mels}:{self.frames}"
-        )
-        cache_path = self.cache_dir / f"{hashlib.sha256(cache_payload.encode('utf-8')).hexdigest()}.pt"
-        if cache_path.exists():
-            x = torch.load(cache_path, map_location="cpu", weights_only=True)
-        else:
-            x = _mel_tensor(
-                str(audio_path),
-                sample_rate=self.sample_rate,
-                audio_duration=self.audio_duration,
-                n_mels=self.n_mels,
-                frames=self.frames,
-            )
-            temporary_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
-            torch.save(x, temporary_path)
-            temporary_path.replace(cache_path)
+        array = load_or_compute(self.cache_dir, audio_path, self.sample_rate, self.audio_duration, self.n_mels, self.frames)
+        x = torch.from_numpy(array)
         y = torch.tensor(int(self.labels[index]), dtype=torch.long)
         return x, y
+
+
+def _warm_mel_cache(
+    tracks: list[dict[str, Any]],
+    cache_dir: Path,
+    sample_rate: int,
+    audio_duration: float,
+    n_mels: int,
+    frames: int,
+    workers: int,
+) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for track in tracks:
+        audio_path = Path(str(track["audio_path"])).expanduser().resolve()
+        if not cache_path(cache_dir, audio_path, sample_rate, audio_duration, n_mels, frames).exists():
+            jobs.append((str(audio_path), str(cache_dir), sample_rate, audio_duration, n_mels, frames))
+    print(f"Mel cache: {len(tracks) - len(jobs)} cached, {len(jobs)} to compute with {workers} worker(s)")
+    if not jobs:
+        return
+
+    failures: list[str] = []
+    executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    results = executor.map(warm_cache_entry, jobs, chunksize=8) if executor else map(warm_cache_entry, jobs)
+    try:
+        for done, (audio_path, error) in enumerate(results, start=1):
+            if error:
+                failures.append(f"{audio_path}: {error}")
+            if done % 250 == 0 or done == len(jobs):
+                print(f"Mel cache: {done}/{len(jobs)} computed")
+    finally:
+        if executor is not None:
+            executor.shutdown()
+    if failures:
+        raise SystemExit("Could not compute spectrograms for these files:\n" + "\n".join(failures[:20]))
 
 
 class LeNetSpectrogramCNN(nn.Module):
@@ -394,7 +377,7 @@ def _train_one_architecture(
     device: torch.device,
 ) -> dict[str, Any]:
     n_mels = int(_arg(args, "n_mels", 64))
-    frames = int(_arg(args, "frames", 128))
+    frames = _frames(args)
     sample_rate = int(_arg(args, "sample_rate", 22_050))
     audio_duration = float(_arg(args, "audio_duration", 30.0))
     batch_size = int(_arg(args, "batch_size", 16))
@@ -695,6 +678,16 @@ def run_train_cnn(args) -> None:
     else:
         architectures = [requested_architecture]
 
+    _warm_mel_cache(
+        tracks,
+        Path(_arg(args, "cache_dir", None) or output_dir / "mel_cache").expanduser().resolve(),
+        int(_arg(args, "sample_rate", 22_050)),
+        float(_arg(args, "audio_duration", 30.0)),
+        int(_arg(args, "n_mels", 64)),
+        _frames(args),
+        int(_arg(args, "preprocess_workers", 0) or default_workers()),
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     if device.type == "cuda":
@@ -721,7 +714,7 @@ def run_train_cnn(args) -> None:
 
     best = max(rows, key=lambda item: item["validation_macro_f1"])
     n_mels = int(_arg(args, "n_mels", 64))
-    frames = int(_arg(args, "frames", 128))
+    frames = _frames(args)
     model = _build_model(best["architecture"], len(class_names), n_mels, frames).to(device)
     selected_checkpoint = torch.load(
         output_dir / best["architecture"] / "model.pt", map_location=device, weights_only=False

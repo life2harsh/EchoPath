@@ -1,0 +1,48 @@
+ECHOPATH - HOW TO RUN THE TRAINING (read this first)
+====================================================
+
+You only need to do 4 things. The script does the rest by itself.
+
+WHAT YOU NEED
+- Windows 10 or Windows 11
+- An NVIDIA graphics card
+- About 30 GB of free space on the C: drive
+- Internet (it downloads about 8 GB the first time)
+- Time: it runs for several hours (plan for overnight)
+
+STEP 1 - PUT THE FOLDER IN THE RIGHT PLACE
+- If you got a ZIP file: right-click it -> "Extract All..." -> Extract.
+- Move the extracted folder so it is exactly:   C:\EchoPath
+  (You should see RUN_ECHOPATH_RESEARCH.bat directly inside C:\EchoPath.)
+- Do NOT run it from the Desktop, Downloads, OneDrive, or from inside the ZIP.
+
+STEP 2 - PREPARE THE COMPUTER
+- If it is a laptop: plug in the charger and do not close the lid.
+- Close games and other heavy programs.
+
+STEP 3 - START IT
+- Double-click RUN_ECHOPATH_RESEARCH.bat
+- If a blue "Windows protected your PC" box appears:
+  click "More info", then click "Run anyway".
+- If Windows asks to install Python or allow changes, click Yes.
+- A black window opens and text starts scrolling. That is normal.
+- DO NOT close the black window. DO NOT click inside it.
+  Just leave it alone until it says ALL DONE.
+
+STEP 4 - SEND THE RESULT BACK
+- When it finishes, a folder window opens with a file selected:
+    echopath_research_results.zip      <- send this file back
+- If it stopped with an error, it selects this file instead:
+    echopath_research_FAILED_logs.zip  <- send this file back
+
+IF SOMETHING GOES WRONG
+- Power cut, restart, window closed by accident? Just double-click
+  RUN_ECHOPATH_RESEARCH.bat again. It continues where it stopped.
+- It says to update the NVIDIA driver? Go to
+  https://www.nvidia.com/Download/index.aspx , install the newest driver
+  for your graphics card, restart the PC, and run the .bat file again.
+- It says the folder path is too long, or it is inside OneDrive?
+  Move the folder to C:\EchoPath and run it again.
+- It says there is not enough disk space? Delete some big files
+  (old games, videos) and run it again.
+- Anything else: send the FAILED_logs ZIP (or a photo of the screen).
