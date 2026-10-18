@@ -98,6 +98,9 @@ def _extract_one(job: tuple[str, float]) -> tuple[str, dict[str, float] | None, 
 
 
 def _extract_all(jobs: list[tuple[str, float]], workers: int, max_consecutive_crashes: int = 5):
+    if workers > 1 and len(jobs) > 1:
+        yield from _extract_all(jobs[:1], 1, max_consecutive_crashes)
+        jobs = jobs[1:]
     pending = list(jobs)
     pool_size = max(1, workers)
     consecutive_crashes = 0
