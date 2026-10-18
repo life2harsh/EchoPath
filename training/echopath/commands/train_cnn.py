@@ -209,6 +209,7 @@ class LeNetSpectrogramCNN(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d((4, 8)),
         )
 
         with torch.no_grad():
@@ -235,6 +236,7 @@ class VGGStyleSpectrogramCNN(nn.Module):
             self._block(1, 32),
             self._block(32, 64),
             self._block(64, 128),
+            nn.AdaptiveAvgPool2d((2, 4)),
         )
 
         with torch.no_grad():
@@ -433,6 +435,7 @@ def _train_one_architecture(
         "validation_labels": y_validation.tolist(),
         "seed": seed,
         "cache_schema": CACHE_SCHEMA,
+        "parameter_shapes": {name: list(tensor.shape) for name, tensor in model.state_dict().items()},
     }
     if bool(_arg(args, "resume", False)) and resume_path.exists():
         try:
